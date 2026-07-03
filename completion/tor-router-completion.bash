@@ -5,7 +5,9 @@
 #   source /путь/к/tor-router/completion/tor-router-completion.bash
 #
 # Поддерживает:
-#   - дополнение подкоманд: setup apply refresh restore status list add remove help
+# Поддерживает:
+#   - дополнение подкоманд: setup apply refresh restore status list add remove
+#     help -h --help -u --usage -V --version
 #   - дополнение для `remove <TAB>` — подставляет существующие записи из sites.list
 #   - работает как при прямом вызове (./tor-router.sh, tor-router.sh),
 #     так и через sudo (sudo ./tor-router.sh ...)
@@ -31,7 +33,7 @@ _tor_router_complete() {
     local script_path="${COMP_WORDS[$script_index]}"
     local sub_index=$((script_index + 1))
 
-    local commands="setup apply refresh restore status list add remove help"
+    local commands="setup apply refresh restore status list add remove help -h --help -u --usage -V --version"
 
     # Первый аргумент после имени скрипта — подкоманда
     if [[ $COMP_CWORD -eq $sub_index ]]; then
@@ -46,8 +48,8 @@ _tor_router_complete() {
         case "$subcmd" in
             remove)
                 local sites_file
-                sites_file="$(_tor_router_sites_file "$script_path")"
-                if [[ -n "$sites_file" && -f "$sites_file" ]]; then
+                sites_file="$(_tor_router_sites_file)"
+                if [[ -f "$sites_file" ]]; then
                     local entries
                     entries="$(grep -vE '^[[:space:]]*(#|$)' "$sites_file" 2>/dev/null \
                                 | sed 's/#.*$//' | tr -d ' \t\r')"
@@ -69,24 +71,10 @@ _tor_router_complete() {
     return 0
 }
 
-# Находит config/sites.list рядом с реальным расположением скрипта,
-# независимо от того, вызван ли он как ./tor-router.sh, просто tor-router.sh
-# из PATH, или по абсолютному пути.
+# sites.list живёт в XDG-конфиге пользователя (~/.config/tor-router/sites.list),
+# а не рядом со скриптом — так же, как вычисляет путь сам tor-router.sh.
 _tor_router_sites_file() {
-    local script="$1"
-    local resolved dir
-
-    if [[ "$script" == */* ]]; then
-        resolved="$script"
-    else
-        resolved="$(command -v "$script" 2>/dev/null)"
-    fi
-    [[ -z "$resolved" ]] && return 1
-
-    dir="$(cd "$(dirname "$resolved")" 2>/dev/null && pwd)"
-    [[ -z "$dir" ]] && return 1
-
-    echo "$dir/config/sites.list"
+    echo "${XDG_CONFIG_HOME:-$HOME/.config}/tor-router/sites.list"
 }
 
 # Регистрируем автодополнение для типичных способов вызова скрипта.
