@@ -5,10 +5,10 @@
 #   source /путь/к/tor-router/completion/tor-router-completion.bash
 #
 # Поддерживает:
-# Поддерживает:
 #   - дополнение подкоманд: setup apply refresh restore status list add remove
-#     help -h --help -u --usage -V --version
+#     help -h --help -u --usage -V --version -wc --write-conf --install
 #   - дополнение для `remove <TAB>` — подставляет существующие записи из sites.list
+#   - дополнение для `--install <TAB>` — подставляет каталоги (директории)
 #   - работает как при прямом вызове (./tor-router.sh, tor-router.sh),
 #     так и через sudo (sudo ./tor-router.sh ...)
 # =============================================================
@@ -33,7 +33,7 @@ _tor_router_complete() {
     local script_path="${COMP_WORDS[$script_index]}"
     local sub_index=$((script_index + 1))
 
-    local commands="setup apply refresh restore status list add remove help -h --help -u --usage -V --version"
+    local commands="setup apply refresh restore status list add remove help -h --help -u --usage -V --version -wc --write-conf --install"
 
     # Первый аргумент после имени скрипта — подкоманда
     if [[ $COMP_CWORD -eq $sub_index ]]; then
@@ -60,6 +60,10 @@ _tor_router_complete() {
                 # Для add подставлять нечего (произвольный домен/IP) —
                 # оставляем стандартное дополнение выключенным.
                 COMPREPLY=()
+                ;;
+            --install)
+                # После --install ожидается путь-каталог назначения
+                COMPREPLY=( $(compgen -d -- "$cur") )
                 ;;
             *)
                 COMPREPLY=()

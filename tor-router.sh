@@ -7,16 +7,18 @@ set -euo pipefail
 
 APP_TITLE="Скрипт перенаправления трафика в сеть tor. Эквивалент VPN-TOR"
 COPYRIGHT="Copyright (C) 2004-2025 Ariv <ariv@meta.ua> | https://github.com/arivm7 | RI-Network, Kiev, UK"
-VERSION="1.1.0 (2026-07-04)"
+VERSION="1.2.0 (2026-07-13)"
 LAST_CHANGES="\
-v1.0.0 (2026-07-02): Базовый функционал
+v1.2.0 (2026-07-13): Добавление --install Создание .desktop-ярлыка для команды apply;
+                     установка bash-автодополнения в ~/.bashrc (идемпотентно);
 v1.1.0 (2026-07-04): Точечный sudo вместо запуска всего скрипта от root; проверка зависимостей на старте; фикс unbound vars
+v1.0.0 (2026-07-02): Базовый функционал
 "
 
 
 
-APP_NAME=$(basename "$0")                                   # Полное имя скрипта, включая расширение
-APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_NAME=$(basename "${BASH_SOURCE[0]}")                    # Полное имя скрипта, включая расширение
+APP_PATH=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)      # Путь размещения исполняемого скрипта
 FILE_NAME="${APP_NAME%.*}"                                  # Убираем расширение (если есть)
 
 CONFIG_DIRNAME="tor-router"
@@ -60,13 +62,26 @@ STATE_DIR="${HOME}/.local/state/tor-router"
 # внутренней логикой генерации конфига при первом запуске)
 DRY_RUN=0
 
-COLOR_USAGE="\e[1;32m"                          # Терминальный цвет для вывода переменной статуса
-COLOR_ERROR="\e[0;31m"                          # Терминальный цвет для вывода ошибок
-COLOR_INFO="\e[0;34m"                           # Терминальный цвет для вывода информации (об ошибке или причине выхода)
-COLOR_FILENAME="\e[1;36m"                       # Терминальный цвет для вывода имён файлов
-COLOR_OFF="\e[0m"                               # Терминальный цвет для сброса цвета
+COLOR_USAGE="\033[1;32m"        # Терминальный цвет для вывода переменной статуса
+COLOR_ERROR="\033[0;31m"        # Терминальный цвет для вывода ошибок
+COLOR_INFO="\033[0;34m"         # Терминальный цвет для вывода информации (об ошибке или причине выхода)
+COLOR_FILENAME="\033[1;36m"     # Терминальный цвет для вывода имён файлов
+COLOR_OK="\033[0;32m"           # Терминальный цвет для вывода Ok-сообщения (зелёный)
+COLOR_OFF="\033[0m"             # Терминальный цвет для сброса цвета
 
 APP_AWK="awk"
+
+# -------------------------
+# Префиксы для вывода сообщений
+# -------------------------
+PREFIX_OK="${COLOR_OK}[ok]${COLOR_OFF}"
+PREFIX_ERROR="${COLOR_ERROR}[er]${COLOR_OFF}"
+PREFIX_INFO="${COLOR_INFO}[ii]${COLOR_OFF}"
+
+#
+# Рекомендуемый путь по умолчанию для установки скрипта
+#
+INSTALL_PATH="$HOME/bin"                        
 
 ##
 ##  [CONFIG END] Конец секции конфига
@@ -75,13 +90,64 @@ APP_AWK="awk"
 
 
 
+
 #
-#  Печатает сообщение об ошибке цветом COLOR_ERROR и завершает скрипт с кодом $2 (по умолчанию 1).
+# Вывод сообщения об успехе с префиксом [ok]
+# $* -- текст сообщения
 #
-exit_with_msg()
+msg_ok()
 {
-    echo -e "${COLOR_ERROR}$1${COLOR_OFF}" >&2
-    exit "${2:-1}"
+    echo -e "${PREFIX_OK} $*"
+}
+
+#
+# Вывод сообщения об ошибке с префиксом [!!] (без выхода из скрипта)
+# $* -- текст сообщения
+#
+msg_error()
+{
+    echo -e "${PREFIX_ERROR} $*"
+}
+
+#
+# Вывод информационного сообщения с префиксом [ii]
+# $* -- текст сообщения
+#
+msg_info()
+{
+    echo -e "${PREFIX_INFO} $*"
+}
+
+
+#
+# Вывод строки и выход из скрипта
+# $1 -- сообщение
+# $2 -- код ошибки. По умолчанию "1"
+#
+exit_with_msg() {
+    local msg="${1:?Строка не передана или пуста. Смотреть вызывающую функцию.}"
+    local num="${2:-1}"
+    case "${num}" in
+    1)
+        # log_error "ERR: ${msg}"
+        msg="${PREFIX_ERROR} ${msg}"
+        ;;
+    2)
+        # log_error "ERR: ${msg}"
+        msg="${PREFIX_ERROR} ${msg}"
+        msg="${msg}\nПодсказка по использованию: ${COLOR_USAGE}${APP_NAME} --usage|-u${COLOR_OFF}"
+        ;;
+    0)
+        # log_info "OK: ${msg}"
+        msg="${PREFIX_OK} ${msg}"
+        ;;
+    *)
+        # log_info "${msg}"
+        msg="${PREFIX_INFO} ${msg}"
+        ;;
+    esac
+    echo -e "${msg}"
+    exit "$num"
 }
 
 
@@ -120,6 +186,188 @@ read_config_file()
 
 
 #
+# Установка скрипта в указанное место 
+# с проверкой существования файла и возможностью перезаписи
+# А также с проверкой наличия конфига 
+# Использование: APP --install "~/bin"
+# $1      -- путь назначения (необязателен: если пуст, запрашивается
+#            подтверждение на использование INSTALL_PATH по умолчанию)
+# Возврат -- 0 при успешной установке или при явном отказе от перезаписи;
+#            завершает скрипт через exit_with_msg при фатальных ошибках
+#            (нет каталога назначения, ошибка копирования и т.п.)
+#
+#
+# Создаёт .desktop-ярлык для команды "apply" (Freedesktop Desktop Entry),
+# без внешних зависимостей — всё генерируется прямо в скрипте.
+# $1 -- путь к установленному исполняемому файлу
+#
+create_desktop_entry() {
+    local dest="$1"
+    local icon_src="${APP_PATH}/icons/tor_router_apply.svg"
+    local icon_name="security-high"   # системная иконка-заглушка, если своей нет
+
+    if [[ -f "$icon_src" ]]; then
+        local icon_dest_dir="${HOME}/.local/share/icons/hicolor/scalable/apps"
+        local icon_dest="${icon_dest_dir}/tor-router-apply.svg"
+        mkdir -p "$icon_dest_dir" 2>/dev/null
+        if cp "$icon_src" "$icon_dest" 2>/dev/null; then
+            icon_name="tor-router-apply"
+        else
+            msg_info "Не удалось скопировать иконку — использую системную по умолчанию."
+        fi
+    else
+        msg_info "Файл иконки не найден (${icon_src}) — использую системную иконку по умолчанию."
+    fi
+
+    local apps_dir="${HOME}/.local/share/applications"
+    local desktop_file="${apps_dir}/${FILE_NAME}-apply.desktop"
+    mkdir -p "$apps_dir" || { msg_error "Не удалось создать ${apps_dir} — ярлык не создан."; return 1; }
+
+    cat > "$desktop_file" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Tor Router — Apply
+Comment=Tor Router -- применение правил (перенаправление сайтов из sites.list через Tor)
+Exec=${dest} apply
+Icon=${icon_name}
+Terminal=true
+Categories=Network;Security;Utility;
+DESKTOP
+    chmod +x "$desktop_file"
+
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$apps_dir" >/dev/null 2>&1 || true
+    fi
+
+    msg_ok "Ярлык создан: ${desktop_file}"
+}
+
+#
+# Копирует файл автодополнения рядом с исходным скриптом (если есть) в
+# ~/.local/share/tor-router/ и один раз (идемпотентно) подключает его в
+# ~/.bashrc. Повторный запуск не создаёт дублирующихся строк.
+#
+install_bash_completion() {
+    local comp_src="${APP_PATH}/completion/tor-router-completion.bash"
+    if [[ ! -f "$comp_src" ]]; then
+        msg_info "Файл автодополнения не найден рядом со скриптом (${comp_src}) — пропускаю."
+        return 0
+    fi
+
+    local comp_dest_dir="${HOME}/.local/share/tor-router"
+    local comp_dest="${comp_dest_dir}/tor-router-completion.bash"
+    mkdir -p "$comp_dest_dir"
+    cp "$comp_src" "$comp_dest"
+
+    local bashrc="${HOME}/.bashrc"
+    local marker="# tor-router bash completion (auto-added by --install)"
+
+    if [[ -f "$bashrc" ]] && grep -qF "$comp_dest" "$bashrc" 2>/dev/null; then
+        msg_info "Автодополнение уже подключено в ${bashrc} — пропускаю."
+        return 0
+    fi
+
+    {
+        echo ""
+        echo "$marker"
+        echo "[[ -f \"${comp_dest}\" ]] && source \"${comp_dest}\""
+    } >> "$bashrc"
+    msg_ok "Автодополнение добавлено в ${bashrc}. Выполните: source ${bashrc} (или откройте новый терминал)."
+}
+
+#
+# Установка скрипта в указанное место
+# с проверкой существования файла и возможностью перезаписи,
+# генерацией .desktop-ярлыка и подключением bash-автодополнения.
+# Использование: APP --install "~/bin"
+# $1      -- путь назначения (необязателен: если пуст, запрашивается
+#            подтверждение на использование INSTALL_PATH по умолчанию)
+# Возврат -- 0 при успешной установке или при явном отказе от перезаписи;
+#            завершает скрипт через exit_with_msg при фатальных ошибках
+#            (нет каталога назначения и отказ его создать, ошибка копирования и т.п.)
+#
+cmd_install() {
+    local dest_dir="$1"
+
+    if [[ -z "$dest_dir" ]]; then
+        if [[ -z "$INSTALL_PATH" ]]; then
+            msg_error "Переменная INSTALL_PATH не задана"
+            return 1
+        fi
+
+        msg_info "Путь назначения не указан."
+        read -rp "Использовать путь по умолчанию (${INSTALL_PATH})? [y/N]: " ans
+        if [[ "$ans" =~ ^[Yy]$ ]]; then
+            dest_dir="$INSTALL_PATH"
+        else
+            exit_with_msg "Установка отменена." 1
+        fi
+    fi
+
+    if [[ "$dest_dir" == "~"* ]]; then
+        dest_dir="${dest_dir/#\~/$HOME}"
+    fi
+
+    # Определяем путь к текущему скрипту
+    local src
+    src="$(realpath "${BASH_SOURCE[0]}")" || {
+        exit_with_msg "Не удалось определить путь к исходному файлу" 1
+    }
+
+    # Проверка наличия каталога назначения — если нет, предлагаем создать
+    # (а не сразу фатально падаем: ~/bin на свежей системе обычно не существует)
+    if [[ ! -d "$dest_dir" ]]; then
+        msg_info "Каталог назначения не существует: ${dest_dir}"
+        read -rp "Создать его? [y/N]: " ans
+        if [[ "$ans" =~ ^[Yy]$ ]]; then
+            mkdir -p "$dest_dir" || exit_with_msg "Не удалось создать каталог: ${dest_dir}" 1
+        else
+            exit_with_msg "Установка отменена." 1
+        fi
+    fi
+
+    # --- Проверка существования основного файла ---
+    local dest="$dest_dir/$APP_NAME"
+    if [[ -e "$dest" ]]; then
+        read -rp "Файл $dest уже существует. Перезаписать? [y/N]: " ans
+        [[ "$ans" =~ ^[Yy]$ ]] || {
+            msg_info "Установка отменена."
+            return 0
+        }
+    fi
+
+    # Копирование
+    if cp "$src" "$dest"; then
+        chmod +x "$dest" || { msg_error "Ошибка изменения chmod файла"; return 1; }
+        msg_ok "Установлено: $dest"
+    else
+        exit_with_msg "Ошибка копирования" 1
+    fi
+
+    # --- Работа с конфигом (не прерывает установку в любом случае) ---
+    if [[ -e "$CONFIG_FILE" ]]; then
+        msg_info "Обнаружен конфиг-файл: ${COLOR_FILENAME}${CONFIG_FILE}${COLOR_OFF}."
+        msg_info "Его можно оставить, перезаписать командой ${COLOR_USAGE}${APP_NAME} -wc|--write-conf${COLOR_OFF}, либо удалить сейчас."
+        read -rp "Удалить текущий конфиг $CONFIG_FILE? [y/N]: " ans
+        if [[ "$ans" =~ ^[Yy]$ ]]; then
+            mv -f "$CONFIG_FILE" "${CONFIG_FILE}.old.$(date +%s)"
+            msg_info "Старый конфиг перемещён в ${CONFIG_FILE}.old.<timestamp>"
+        else
+            msg_info "Оставлен текущий конфиг ${COLOR_FILENAME}${CONFIG_FILE}${COLOR_OFF}"
+        fi
+    fi
+
+    # --- Ярлык и автодополнение создаются ВСЕГДА, независимо от выбора выше ---
+    create_desktop_entry "$dest"
+    install_bash_completion
+
+    msg_ok "Установка завершена."
+}
+
+
+
+#
 #  ----------------------------------------------------------------------------
 #  Раздел проверки зависимостей: какие программы/пакеты обязательны для работы.
 #  ----------------------------------------------------------------------------
@@ -127,7 +375,7 @@ read_config_file()
 
 # Обязательные бинарники (кроме nft/iptables — для них своя OR-проверка ниже)
 # и соответствующие им пакеты (для подсказки, чем поставить).
-REQUIRED_BINS=(sudo tor getent grep sed awk id ps)
+REQUIRED_BINS=(sudo tor getent grep sed awk id ps realpath)
 declare -A BIN_TO_PKG=(
     [sudo]="sudo"
     [tor]="tor"
@@ -137,6 +385,7 @@ declare -A BIN_TO_PKG=(
     [awk]="gawk"
     [id]="coreutils"
     [ps]="procps"
+    [realpath]="coreutils"
 )
 
 check_dependencies()
@@ -168,7 +417,7 @@ check_dependencies()
     done
     echo "" >&2
     echo "Установите недостающее и повторите запуск, например:" >&2
-    echo "    sudo apt update && sudo apt install -y <пакет1> <пакет2> ..." >&2
+    echo "    ${COLOR_USAGE}sudo apt update && sudo apt install -y <пакет1> <пакет2>${COLOR_OFF} ..." >&2
     exit 1
 }
 
@@ -199,7 +448,7 @@ ensure_priv() {
         return 0
     fi
     if ! sudo -v; then
-        exit_with_msg "[!] Не удалось получить права root через sudo." 1
+        exit_with_msg "${COLOR_ERROR}[!]${COLOR_OFF} Не удалось получить права root через sudo." 1
     fi
 }
 
@@ -365,21 +614,21 @@ tor_setup() {
     }
 
     local marker="# --- tor-router managed block ---"
-    if grep -qF "$marker" "$torrc" 2>/dev/null; then
+    if grep -qF "${marker}" "${torrc}" 2>/dev/null; then
         echo "[i] torrc уже содержит блок tor-router — пропускаю."
     else
         ensure_priv
-        run_priv cp "$torrc" "${torrc}.bak.$(date +%s)"
+        run_priv cp "${torrc}" "${torrc}.bak.$(date +%s)"
         {
             echo ""
-            echo "$marker"
+            echo "${marker}"
             echo "TransPort 127.0.0.1:${TOR_TRANS_PORT}"
             echo "DNSPort 127.0.0.1:${TOR_DNS_PORT}"
             echo "AutomapHostsOnResolve 1"
             echo "VirtualAddrNetworkIPv4 10.192.0.0/10"
-            echo "# --- end tor-router managed block ---"
-        } | run_priv tee -a "$torrc" >/dev/null
-        echo "[+] torrc обновлён (бэкап сохранён рядом). TransPort=$TOR_TRANS_PORT DNSPort=$TOR_DNS_PORT"
+            echo "${marker}"
+        } | run_priv tee -a "${torrc}" >/dev/null
+        echo "[+] torrc обновлён (бэкап сохранён рядом). TransPort=${TOR_TRANS_PORT} DNSPort=${TOR_DNS_PORT}"
     fi
 
     ensure_priv
@@ -536,22 +785,26 @@ iptables_status() {
 
 
 usage() {
-    cat <<EOF
+echo -e "$(cat << EOF    
 ${APP_TITLE}
-Использование: $APP_NAME <команда> [аргумент]
+Использование: ${COLOR_USAGE}$APP_NAME <команда> [аргумент]${COLOR_OFF}
 
-  setup               Настроить Tor (TransPort/DNSPort в torrc) и определить фаервол
-  apply               Применить маршруты для всех сайтов из sites.list
-  restore             Полностью откатить фаервол к исходному состоянию
-  status              Показать текущие правила/цепочки
-  list                Показать содержимое sites.list
-  add <domain|ip>     Добавить запись в sites.list
-  remove <domain|ip>  Удалить запись из sites.list
-  refresh             Перерезолвить домены и переприменить правила (= apply)
+  ${COLOR_USAGE}setup${COLOR_OFF}               Настроить Tor (TransPort/DNSPort в torrc) и определить фаервол
+  ${COLOR_USAGE}apply${COLOR_OFF}               Применить маршруты для всех сайтов из sites.list
+  ${COLOR_USAGE}restore${COLOR_OFF}             Полностью откатить фаервол к исходному состоянию
+  ${COLOR_USAGE}status${COLOR_OFF}              Показать текущие правила/цепочки
+  ${COLOR_USAGE}list${COLOR_OFF}                Показать содержимое sites.list
+  ${COLOR_USAGE}add <domain|ip>${COLOR_OFF}     Добавить запись в sites.list
+  ${COLOR_USAGE}remove <domain|ip>${COLOR_OFF}  Удалить запись из sites.list
+  ${COLOR_USAGE}refresh${COLOR_OFF}             Перерезолвить домены и переприменить правила (= apply)
 
-  -u|--usage
-  -h|--help|help
-  -V|--version        Справка по использованию
+  ${COLOR_USAGE}-u|--usage${COLOR_OFF}             Показать справку по использованию
+  ${COLOR_USAGE}-h|--help|help${COLOR_OFF}
+  ${COLOR_USAGE}-V|--version${COLOR_OFF}        Справка по использованию
+  ${COLOR_USAGE}-wc|--write-conf${COLOR_OFF}    Перезапись конфига по умолчанию
+
+  ${COLOR_USAGE}--install [<path>]${COLOR_OFF}  Установить скрипт в указанное место (например, ${COLOR_FILENAME}${APP_NAME} --install ~/bin${COLOR_OFF})
+                      Путь установки по умолчанию ${COLOR_FILENAME}${INSTALL_PATH}${COLOR_OFF}.
 
 Права root не требуются для запуска скрипта целиком — при необходимости
 он сам запросит sudo только для команд, реально работающих с фаерволом/Tor
@@ -562,7 +815,10 @@ ${APP_TITLE}
 ${LAST_CHANGES}
 ${COPYRIGHT}
 EOF
+)"
 }
+
+
 
 cmd_status() {
     ensure_priv
@@ -572,6 +828,8 @@ cmd_status() {
         iptables) iptables_status ;;
     esac
 }
+
+
 
 cmd_apply() {
     ensure_priv
@@ -584,6 +842,8 @@ cmd_apply() {
     esac
 }
 
+
+
 cmd_restore() {
     ensure_priv
     detect_firewall_backend
@@ -593,6 +853,8 @@ cmd_restore() {
     esac
 }
 
+
+
 cmd_list() {
     init_sites_file
     if [[ ! -s "$SITES_FILE" ]]; then
@@ -601,6 +863,8 @@ cmd_list() {
     fi
     grep -vE '^\s*(#|$)' "$SITES_FILE" || echo "[i] sites.list пуст."
 }
+
+
 
 cmd_add() {
     local entry="${1:-}"
@@ -615,6 +879,8 @@ cmd_add() {
     fi
 }
 
+
+
 cmd_remove() {
     local entry="${1:-}"
     [[ -z "$entry" ]] && { echo "Укажите домен или IP: remove <domain|ip>" >&2; exit 1; }
@@ -627,19 +893,60 @@ cmd_remove() {
     fi
 }
 
+
+
 main() {
     local cmd="${1:-}"
     shift || true
     case "$cmd" in
-        setup)   detect_firewall_backend; tor_setup ;;
-        apply)   cmd_apply ;;
-        refresh) cmd_apply ;;
-        restore) cmd_restore ;;
-        status)  cmd_status ;;
-        list)    cmd_list ;;
-        add)     cmd_add "${1:-}" ;;
-        remove)  cmd_remove "${1:-}" ;;
-        -u|--usage|-h|--help|help|-V|--version|"") usage ;;
+        setup)   
+            detect_firewall_backend; 
+            tor_setup 
+            ;;
+
+        apply)   
+            cmd_apply 
+            ;;
+
+        refresh) 
+            cmd_apply 
+            ;;
+
+        restore) 
+            cmd_restore 
+            ;;
+
+        status)  
+            cmd_status 
+            ;;
+
+        list)    
+            cmd_list 
+            ;;
+
+        add)     
+            cmd_add "${1:-}" 
+            ;;
+
+        remove)  
+            cmd_remove "${1:-}" 
+            ;;
+
+        -u|--usage|-h|--help|help|-V|--version|"") 
+            usage 
+            ;;
+
+        -wc|--write-conf)
+            echo "перезапись конфига по умолчанию: ${CONFIG_FILE}"
+            save_config_file
+            exit 0
+            ;;
+
+        --install)
+            cmd_install "${1:-}"
+            exit 0
+            ;;
+
         *) echo "Неизвестная команда: $cmd" >&2; usage; exit 1 ;;
     esac
 }
